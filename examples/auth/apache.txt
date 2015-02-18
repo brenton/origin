@@ -1,0 +1,175 @@
+# This example shows how OpenShift can be proxied and provide all services
+# securely via TLS.  The comments in the configuration explain the important
+# parts to change for your environment.  This can serve as a reference
+# configuration for providing the same solution with any proxy that implements
+# these basic features.
+#
+# Details of this reference implementation
+# * Usage of Server Name Indication
+#   There is no requirement for SNI to be used.  This is merely a convenience
+#   so that the API and Management Console can be proxied over a single IP.
+# * Usage of mod_auth_form and mod_session
+#   As with SNI, mod_auth_form and mod_session are merely an example of one way
+#   to do things.  The benefit of using sessions is that a logout link can be
+#   served from the UI.  In many cases having ldap back the form authentication
+#   will make more sense than a file created with htpasswd.  Moreover, form
+#   authentication need not be used at all if mod_auth_kerb is preferred.
+#
+# Requirements
+# * The OpenShift master should be launched with the
+#   ORIGIN_AUTH_REQUEST_HANDLERS="bearer,requestheader" environment variable
+#   set as well as the --require-authentication flag
+# * setsebool -P httpd_can_network_connect 1
+# * setsebool -P httpd_can_network_relay 1
+# * yum install mod_session (this currently comes from RHEL 7 Optional)
+#
+# Security considerations
+# Using the "requestheader" Request Authentication Handler means that
+# X-Remote-User will be passed to the backend and trusted by OpenShift.  This
+# was commonly used in OpenShift versions 1 and 2 however it's important to
+# ensure that this cannot be spoofed.  Steps that should be taken for
+# production implementations include:
+#
+# * Configure the Proxy use TLS.  Apache's mod_ssl can allow mod_proxy to use
+#   SSL for connections to the backend.  This can ensure that the request was
+#   not tampered.  Configuring a client certificate in the proxy will allow
+#   athentication to OpenShift to ensure that someone with network access to
+#   the OpenShift Master cannot simply issue requests directly and set
+#   X-Remote-User.
+# * This reference configuration makes use of mod_auth_form.  Unfortunately it
+#   does not provide CSRF protection.  It also makes use of "inline" form
+#   athentication.  See the note at
+#   http://httpd.apache.org/docs/2.4/mod/mod_auth_form.html#inline for security
+#   implications.
+# * Configuring mod_ssl for production usage is outside the scope of this
+#   example.  It's recommended to disable the SSLv2 and SSLv3.
+#
+# Testing
+# Once Apache loads this configuration you should be able to browse to
+# https://v3.api.example.com/oauth/token/request to fetch a token.  You can
+# then pass this token to osc with the --token flag.  For GA the Management
+# Console will have it's own Oauth 2.0 client.  This means when you navigate to
+# https://v3.console.example.com it will trigger an oauth token request flow
+# and then redirect the user back to the console upon success.
+
+LoadModule auth_form_module modules/mod_auth_form.so
+LoadModule session_module modules/mod_session.so
+LoadModule session_crypto_module modules/mod_session_crypto.so
+LoadModule request_module modules/mod_request.so
+LoadModule session_cookie_module modules/mod_session_cookie.so
+
+# Nothing needs to be served over HTTP.  This virtual host simply redirects to
+# HTTPS.
+<VirtualHost *:80>
+  DocumentRoot /var/www/html
+  RewriteEngine              On
+  RewriteRule     ^(.*)$     https://%{HTTP_HOST}$1 [R,L]
+</VirtualHost>
+
+# This VirtualHost serves the OpenShift and Kubernetes APIs.  In this example
+# mod_auth_form is used to integrate with the OpenShift Oauth 2.0 server.
+<VirtualHost *:443>
+  ServerName v3.api.example.com
+  DocumentRoot /var/www/html
+  SSLEngine on
+  SSLCertificateFile /etc/pki/tls/certs/localhost.crt
+  SSLCertificateKeyFile /etc/pki/tls/private/localhost.key
+  # mod_session integrates with mod_auth_form
+  Session On
+  SessionCookieName session path=/;domain=example.com;httponly;secure;
+  SessionCryptoPassphrase secret
+
+  # mod_auth_form needs a location to access the HTML form used for input.
+  #
+  # Refer to http://httpd.apache.org/docs/2.4/mod/mod_auth_form.html#inline for
+  # example content that can be placed in the DocumentRoot for this
+  # VirtualHost.
+  <Location /login.html>
+    # Don't let this match the proxy for /
+    ProxyPass !
+  </Location>
+  <Location /logout.html>
+    # Don't let this match the proxy for /
+    ProxyPass !
+    SetHandler form-logout-handler
+    AuthName realm
+    AuthFormLogoutLocation /loggedout.html
+  </Location>
+  <Location /loggedout.html>
+    # Don't let this match the proxy for /
+    ProxyPass !
+  </Location>
+
+  # Insert your backend server name/ip here.
+  SSLProxyEngine on
+  SSLProxyCACertificateFile /etc/pki/CA/certs/root.crt
+  SSLProxyMachineCertificateFile /etc/pki/tls/certs/admin.pem
+  SSLProxyCheckPeerCN off
+  SSLProxyCheckPeerName off
+  SSLProxyCheckPeerExpire off
+  ProxyPass / https://172.16.4.89:8443/
+  ProxyPassReverse / https://172.16.4.89:8443/
+  # Requests should be able to access /oauth/token/request and
+  # /oauth/token/display without authentication.  In the case of
+  # /outh/token/display OpenShift will check one of the
+  # ORIGIN_AUTH_REQUEST_HANDLERS to see if the request is authenticated.
+  # Technically it would require authentication for /oauth/token/display simply
+  # by modifying these two ProxyMatch stanzas.
+  <ProxyMatch /oauth/token/.*>
+    Allow from all
+  </ProxyMatch>
+  
+  # /oauth/authorize and /oauth/approve should be protected by Apache.
+  <ProxyMatch /oauth/a.*>
+    AuthUserFile /etc/origin/htpasswd
+    AuthType form
+    AuthName realm
+    AuthFormProvider file
+    Require valid-user
+    RequestHeader set X-Remote-User %{REMOTE_USER}s
+  
+    # This is an example of Inline authentication with mod_auth_form.  Here's the flow:
+    # 1) GET /oauth/token/request => 302 (from OpenShift)
+    # 2) GET /oauth/authorize?client_id=openshift-browser-client&redirect_uri=http%3A%2F%2F172.16.4.89%3A8080%2Foauth%2Ftoken%2Fdisplay&response_type=code => 401 (from Apache)
+    #    At this point Apache injects the form from the ErrorDocument
+    # 3) POST /oauth/authorize?client_id=openshift-browser-client&redirect_uri=http%3A%2F%2F172.16.4.89%3A8080%2Foauth%2Ftoken%2Fdisplay&response_type=code => (302 from Apache)
+    #    At this point Apache retries the original GET request from #1 against the backend.
+    # 4) GET /oauth/token/display?code=M2EyMzljZmQtMGM1Yi00YmIzLTk1MmMtMGM0ODg5NDZlYjUx&state= => (200 from OpenShift)
+    ErrorDocument 401 /login.html
+  </ProxyMatch>
+  # All other requests should use Bearer tokens.  These can only be verified by
+  # OpenShift so we need to let these requests pass through.
+  <Proxy *>
+    SetEnvIfNoCase Authorization Bearer passthrough
+    Allow from env=passthrough
+  
+    Order Deny,Allow
+    Deny from all
+    Satisfy any
+  </Proxy>
+</VirtualHost>
+
+# The console is another Oauth client.  As such it doesn't need any special
+# authentication treatment.  The important thing is that it is served over SSL.  The reason it is handled as a seperate VirtualHost is because the Asset Server currently runs on a different port than the Master yet they both are exposed via the root (/) context.  In the future it will be possible to change the context at which the Asset Server is exposed.
+<VirtualHost *:443>
+  ServerName v3.console.example.com
+  DocumentRoot /var/www/html
+  SSLEngine on
+  SSLCertificateFile /etc/pki/tls/certs/localhost.crt
+  SSLCertificateKeyFile /etc/pki/tls/private/localhost.key
+  SSLProxyEngine on
+  SSLProxyCACertificateFile /etc/pki/CA/certs/root.crt
+  SSLProxyMachineCertificateFile /etc/pki/tls/certs/admin.pem
+  SSLProxyCheckPeerCN off
+  SSLProxyCheckPeerName off
+  SSLProxyCheckPeerExpire off
+  # Insert your backend server name/ip here.
+  ProxyPass / https://172.16.4.89:8444/
+  ProxyPassReverse / https://172.16.4.89:8444/
+</VirtualHost>
+
+ProxyPreserveHost On
+TraceEnable off
+
+# Don't let this header be spoofed.
+RequestHeader unset X-Remote-User
