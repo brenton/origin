@@ -1,40 +1,57 @@
-## Add the following settings to /etc/sysconfig/openshift-master:
+# [RequestHeaderIdentityProvider](http://docs.openshift.org/latest/admin_guide/configuring_authentication.html#RequestHeaderIdentityProvider) configuration example
 
-    OPENSHIFT_OAUTH_REQUEST_HANDLERS=requestheader,session
-    OPENSHIFT_OAUTH_REQUEST_HEADER_CA_FILE=/var/lib/openshift/openshift.local.certificates/ca/cert.crt
+This example configures an authentication proxy on the same host as the Master.
+The traffic between the Proxy and the Master is excrypted and authentication is
+handled by X509 client certificates.  This is merely a convenience and may not
+be suitable for your environment.  For example, if you were already running the
+router on the Master then port 443 would not be available.
 
-## Copy certificates to a location SELinux will allow Apache to read:
+This configuration is especially useful for porting authentication integrations
+from previous versions of OpenShift.  Apache is not strictly required as this
+example is meant to serve as a reference configuration for other Proxies.
 
-    pushd /var/lib/openshift
-    cp openshift.local.certificates/master/cert.crt /etc/pki/tls/certs/localhost.crt
-    cp openshift.local.certificates/master/key.key /etc/pki/tls/private/localhost.key
-    cp openshift.local.certificates/ca/cert.crt /etc/pki/CA/certs/ca.crt
-    cat openshift.local.certificates/openshift-client/cert.crt \
-        openshift.local.certificates/openshift-client/key.key > \
-        /etc/pki/tls/certs/openshift-client.pem
+## Install Apache
+
+    yum install -y httpd mod_ssl
+
+## Generate a client certificate for the proxy:
+
+    osadm create-api-client-config --certificate-authority='/etc/openshift/master/ca.crt' \
+                                   --client-dir='/etc/openshift/master/authproxy' \
+                                   --signer-cert='/etc/openshift/master/ca.crt' \
+                                   --signer-key='/etc/openshift/master/ca.key' \
+                                   --signer-serial='/etc/openshift/master/ca.serial.txt' \
+                                   --user='system:authproxy'
+
+Note: the `--user` can be anything however in general it should be something
+that will by default have no API access.
+
+## Copy certificates to a location SELinux will allow Apache to read
+
+    pushd /etc/openshift/master
+      cp master.server.crt /etc/pki/tls/certs/localhost.crt
+      cp master.server.key /etc/pki/tls/private/localhost.key
+      cp ca.crt /etc/pki/CA/certs/ca.crt
+      cat authproxy/system\:authproxy.crt \
+          authproxy/system\:authproxy.key > \
+          /etc/pki/tls/certs/authproxy.pem
     popd
 
-## Create the projects
-    openshift ex new-project demo --display-name="OpenShift 3 Demo" \ 
-    --description="This is the first demo project with OpenShift v3" \
-    --admin=requestheader:joe
-
-## Copy the CA certificate to a the user home directories so they can use `osc login`:
-
-    pushd /var/lib/openshift
-    cp openshift.local.certificates/ca/cert.crt ~joe/ca.crt
-    popd
+Note: If you are running the authentication proxy on a different hostname that
+the Master it will be important to generate a certificate that matches and not
+use the default Master certificate as shown above.  The value for
+`masterPublicURL` in `/etc/openshift/master/master-config.yaml` must be
+included in the `X509v3 Subject Alternative Name` in the certificate that
+Apache is going to use.  For convenience you could use `osadm
+create-server-cert` to create a new server certificate if the default aren't
+suitable for your environment.
 
 ## Set up Apache
 Unlike OpenShift Enterprise version 2 this proxy does not need to reside on the
 same host as the Master.  It uses a client certificate to connect to the Master
 which is configured to trust the `X-Remote-User` header.
 
-Note: Currently we are not proxying the web console.  It will still need to be
-accessed over port `8443`.  In the near future it will be possible to serve the
-web console from a subcontext which will make the proxypass rules simple.
-
-Here is an example of using a file-backed Basic authentication:
+Note: This example uses file-backed Basic authentication.
 
 ~~~
 # Nothing needs to be served over HTTP.  This virtual host simply redirects to
@@ -55,7 +72,7 @@ Here is an example of using a file-backed Basic authentication:
 
   SSLProxyEngine on
   SSLProxyCACertificateFile /etc/pki/CA/certs/ca.crt
-  SSLProxyMachineCertificateFile /etc/pki/tls/certs/openshift-client.pem
+  SSLProxyMachineCertificateFile /etc/pki/tls/certs/authproxy.pem
 
   # Insert your backend server name/ip here.
   ProxyPass / https://ose3-master.example.com:8443/
@@ -73,12 +90,21 @@ Here is an example of using a file-backed Basic authentication:
 
   # /oauth/authorize and /oauth/approve should be protected by Apache.
   <ProxyMatch /oauth/a.*>
-    AuthUserFile /etc/openshift-passwd
+    AuthUserFile /etc/openshift/htpasswd
     AuthType basic
 
     # For ldap:
     # AuthBasicProvider ldap
     # AuthLDAPURL "ldap://ldap.example.com:389/ou=People,dc=my-domain,dc=com?uid?sub?(objectClass=*)"
+
+    # For Kerberos remove "AuthType basic" and insert the following:
+    # AuthType Kerberos
+    # KrbMethodNegotiate on
+    # KrbMethodK5Passwd off
+    # KrbServiceName Any
+    # KrbAuthRealms EXAMPLE.COM
+    # Krb5Keytab /path/to/keytab
+    # KrbSaveCredentials off
 
     AuthName openshift
     Require valid-user
@@ -100,18 +126,70 @@ Here is an example of using a file-backed Basic authentication:
 RequestHeader unset X-Remote-User
 ~~~
 
-## Log in
+If you are using the default htpasswd implementation you can run the following:
 
-    osc login --cluster=master --server=https://ose3-master.example.com --namespace=sinatra --certificate-authority=/home/joe/ca.crt
+yum -y install httpd-tools
+touch /etc/openshift/htpasswd
+htpasswd -b /etc/openshift/htpasswd joe redhat
+
+## OpenShift Master configuration
+
+All instances of `masterPublicURL` and `assetPublicURL` need to match the
+hostname and port for the Apache VirtualHost.
+
+    masterPublicURL: https://ose3-master.example.com:443
+    assetPublicURL: https://ose3-master.example.com:443/console/
+    publicURL: https://ose3-master.example.com:443/console/
+
+Add the correct host/port combination to the `corsAllowedOrigins`:
+
+    - ose3-master.example.com:443
+
+Configure the [RequestHeaderIdentityProvider](http://docs.openshift.org/latest/admin_guide/configuring_authentication.html#RequestHeaderIdentityProvider) 
+
+~~~~
+  identityProviders:
+  - name: requestheader
+    challenge: false
+    login: false
+    provider:
+      apiVersion: v1
+      kind: RequestHeaderIdentityProvider
+      clientCA: /etc/openshift/master/ca.crt
+      headers:
+      - X-Remote-User
+~~~~
+
+Now restart everything:
+
+  systemctl restart httpd
+  systemctl restart openshift-master
 
 ## Testing
+
+    osc login -u joe \
+      --certificate-authority=/etc/openshift/master/ca.crt \
+      --server=https://ose3-master.example.com:443
+
+Be sure to sanity test by passing an incorrect password to `osc login`.  You
+can also run sanity tests with curl:
+
 Bypass the proxy.  The following should work:
 
-    curl -L -k -H "X-Remote-User: joe" --cert /etc/pki/tls/certs/openshift-client.pem https://ose3-master.example.com:8443/oauth/token/request
+    curl -L -k -H "X-Remote-User: joe" --cert /etc/pki/tls/certs/authproxy.pem https://ose3-master.example.com:8443/oauth/token/request
 
 Bypass the proxy.  This should be denied:
 
     curl -L -k -H "X-Remote-User: joe" https://ose3-master.example.com:8443/oauth/token/request
 
-Obviously passing an incorrect password to `osc login` should also return a
-401.
+## Known limitations
+
+Putting authentication in front of the master means that OpenShift cannot
+provide the branded OpenShift login form.  This example will result in a
+standard browser 401 basic authentication challenge box.
+
+In addition, this confuses the web console logout scenario as well.  Clicking
+logout from the Console will clear the session cookie however to actually
+logging out will be dependent on the authentication method chosen.  In the case
+of basic authentication the Browser's authentication cache will need to be
+cleared.  For kerberos it will be required to run kdestroy.
