@@ -74,6 +74,16 @@ Note: This example uses file-backed Basic authentication.
   SSLProxyCACertificateFile /etc/pki/CA/certs/ca.crt
   SSLProxyMachineCertificateFile /etc/pki/tls/certs/authproxy.pem
 
+  # Needed for efficient log watching
+  SetEnv proxy-sendchunked 1
+
+  # The value here will be important to tune for your performance needs.  At
+  # some point Apache has to clean up stale connections.  The proxy is unable
+  # to differenciate stale connections with say 'osc log -f' on a pod that
+  # simply isn't outputing anything.  There are likely many other ProxyPass
+  # settings that will need to be adjusted for Production workloads.
+  ProxyTimeout 60
+
   # Insert your backend server name/ip here.
   ProxyPass / https://ose3-master.example.com:8443/
   ProxyPassReverse / https://ose3-master.example.com:8443/
@@ -162,8 +172,8 @@ Configure the [RequestHeaderIdentityProvider](http://docs.openshift.org/latest/a
 
 Now restart everything:
 
-  systemctl restart httpd
-  systemctl restart openshift-master
+    systemctl restart httpd
+    systemctl restart openshift-master
 
 ## Testing
 
