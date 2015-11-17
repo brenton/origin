@@ -54,7 +54,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     "num_minions"       => ENV['OPENSHIFT_NUM_MINIONS'] || 2,
     "rebuild_yum_cache" => false,
     "cpus"              => ENV['OPENSHIFT_NUM_CPUS'] || 2,
-    "memory"            => ENV['OPENSHIFT_MEMORY'] || 2560,
+    "memory"            => ENV['OPENSHIFT_MEMORY'] || 4096,
     "fixup_net_udev"    => ENV['OPENSHIFT_FIXUP_NET_UDEV'] || true,
     "skip_build"        => ENV['OPENSHIFT_SKIP_BUILD'] || false,
     "sync_folders_type" => nil,
@@ -212,6 +212,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         config.vm.network "forwarded_port", guest: 443, host: 1443
         config.vm.network "forwarded_port", guest: 8080, host: 8080
         config.vm.network "forwarded_port", guest: 8443, host: 8443
+config.vm.network "forwarded_port", guest: 5000, host: 5000
       end
     end
 
