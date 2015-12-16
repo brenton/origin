@@ -205,15 +205,15 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         end
       end
 
-      if vagrant_openshift_config['private_network_ip']
-        config.vm.network "private_network", ip: vagrant_openshift_config['private_network_ip']
-      else
-        config.vm.network "forwarded_port", guest: 80, host: 1080
-        config.vm.network "forwarded_port", guest: 443, host: 1443
-        config.vm.network "forwarded_port", guest: 8080, host: 8080
-        config.vm.network "forwarded_port", guest: 8443, host: 8443
-config.vm.network "forwarded_port", guest: 5000, host: 5000
-      end
+      #if vagrant_openshift_config['private_network_ip']
+      config.vm.network "private_network", ip: "127.0.0.100"
+      #else
+      #  config.vm.network "forwarded_port", guest: 80, host: 1080
+      #  config.vm.network "forwarded_port", guest: 443, host: 1443
+      #  config.vm.network "forwarded_port", guest: 8080, host: 8080
+      #  config.vm.network "forwarded_port", guest: 8443, host: 8443
+      #  config.vm.network "forwarded_port", guest: 5001, host: 5000
+      #end
     end
 
   end # vm definition(s)
